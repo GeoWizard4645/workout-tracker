@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+  <title>Workout Tracker</title>
+
+  <!-- iOS home-screen web app -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Workouts">
+  <meta name="theme-color" content="#0f1218">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <link rel="manifest" href="manifest.webmanifest">
+
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <main id="view"></main>
+
+  <!-- Active-session floating bar (shown when a session is running) -->
+  <div id="session-bar" class="session-bar hidden">
+    <div class="session-bar-info">
+      <span class="pulse-dot"></span>
+      <span id="session-bar-text">Workout in progress</span>
+    </div>
+    <button class="btn btn-small btn-primary" data-action="resume-session">Resume</button>
+  </div>
+
+  <nav class="tabbar">
+    <button class="tab active" data-tab="home">
+      <svg viewBox="0 0 24 24"><path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 10.5V20h13v-9.5"/></svg>
+      <span>Home</span>
+    </button>
+    <button class="tab" data-tab="plan">
+      <svg viewBox="0 0 24 24"><path d="M8 4h8M7 8h10M5 12h14M7 16h10M8 20h8"/></svg>
+      <span>Plan</span>
+    </button>
+    <button class="tab tab-go" data-tab="log">
+      <svg viewBox="0 0 24 24"><path d="M6.5 6.5v11M17.5 6.5v11M3 9.5v5M21 9.5v5M6.5 12h11"/></svg>
+      <span>Log</span>
+    </button>
+    <button class="tab" data-tab="history">
+      <svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/></svg>
+      <span>History</span>
+    </button>
+    <button class="tab" data-tab="settings">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.8v3M12 18.2v3M2.8 12h3M18.2 12h3M5.5 5.5l2.1 2.1M16.4 16.4l2.1 2.1M18.5 5.5l-2.1 2.1M7.6 16.4l-2.1 2.1"/></svg>
+      <span>More</span>
+    </button>
+  </nav>
+
+  <!-- Templates for the two body-map figures -->
+  <template id="tpl-body-front">
+    <svg class="bodymap" viewBox="0 0 220 400" xmlns="http://www.w3.org/2000/svg">
+      <g class="silhouette">
+        <circle cx="110" cy="30" r="19"/>
+        <rect x="102" y="47" width="16" height="12" rx="5"/>
+        <path d="M70 62 Q110 50 150 62 L156 120 Q150 160 138 178 L138 196 Q138 206 110 206 Q82 206 82 196 L82 178 Q70 160 64 120 Z"/>
+        <rect x="48" y="74" width="22" height="120" rx="11"/>
+        <rect x="150" y="74" width="22" height="120" rx="11"/>
+        <rect x="78" y="198" width="30" height="160" rx="14"/>
+        <rect x="112" y="198" width="30" height="160" rx="14"/>
+      </g>
+      <g class="muscles">
+        <circle data-m="shoulders" cx="73" cy="84" r="15"/>
+        <circle data-m="shoulders" cx="147" cy="84" r="15"/>
+        <ellipse data-m="chest" cx="92" cy="103" rx="19" ry="14"/>
+        <ellipse data-m="chest" cx="128" cy="103" rx="19" ry="14"/>
+        <ellipse data-m="biceps" cx="61" cy="124" rx="10" ry="18"/>
+        <ellipse data-m="biceps" cx="159" cy="124" rx="10" ry="18"/>
+        <ellipse data-m="forearms" cx="57" cy="168" rx="8" ry="21"/>
+        <ellipse data-m="forearms" cx="163" cy="168" rx="8" ry="21"/>
+        <rect data-m="abs" x="97" y="122" width="26" height="52" rx="9"/>
+        <rect data-m="obliques" x="84" y="126" width="10" height="42" rx="5"/>
+        <rect data-m="obliques" x="126" y="126" width="10" height="42" rx="5"/>
+        <ellipse data-m="quads" cx="93" cy="248" rx="14" ry="42"/>
+        <ellipse data-m="quads" cx="127" cy="248" rx="14" ry="42"/>
+      </g>
+      <text class="figure-label" x="110" y="392">FRONT</text>
+    </svg>
+  </template>
+
+  <template id="tpl-body-back">
+    <svg class="bodymap" viewBox="0 0 220 400" xmlns="http://www.w3.org/2000/svg">
+      <g class="silhouette">
+        <circle cx="110" cy="30" r="19"/>
+        <rect x="102" y="47" width="16" height="12" rx="5"/>
+        <path d="M70 62 Q110 50 150 62 L156 120 Q150 160 138 178 L138 196 Q138 206 110 206 Q82 206 82 196 L82 178 Q70 160 64 120 Z"/>
+        <rect x="48" y="74" width="22" height="120" rx="11"/>
+        <rect x="150" y="74" width="22" height="120" rx="11"/>
+        <rect x="78" y="198" width="30" height="160" rx="14"/>
+        <rect x="112" y="198" width="30" height="160" rx="14"/>
+      </g>
+      <g class="muscles">
+        <path data-m="traps" d="M110 56 Q92 60 76 74 Q92 84 110 86 Q128 84 144 74 Q128 60 110 56 Z"/>
+        <circle data-m="shoulders" cx="73" cy="84" r="15"/>
+        <circle data-m="shoulders" cx="147" cy="84" r="15"/>
+        <path data-m="lats" d="M86 94 Q74 118 80 140 Q88 154 106 158 L106 98 Q95 97 86 94 Z"/>
+        <path data-m="lats" d="M134 94 Q146 118 140 140 Q132 154 114 158 L114 98 Q125 97 134 94 Z"/>
+        <rect data-m="lowerback" x="98" y="156" width="24" height="26" rx="8"/>
+        <ellipse data-m="triceps" cx="61" cy="124" rx="10" ry="18"/>
+        <ellipse data-m="triceps" cx="159" cy="124" rx="10" ry="18"/>
+        <ellipse data-m="forearms" cx="57" cy="168" rx="8" ry="21"/>
+        <ellipse data-m="forearms" cx="163" cy="168" rx="8" ry="21"/>
+        <ellipse data-m="glutes" cx="94" cy="196" rx="16" ry="14"/>
+        <ellipse data-m="glutes" cx="126" cy="196" rx="16" ry="14"/>
+        <ellipse data-m="hamstrings" cx="92" cy="252" rx="13" ry="36"/>
+        <ellipse data-m="hamstrings" cx="128" cy="252" rx="13" ry="36"/>
+        <ellipse data-m="calves" cx="92" cy="322" rx="10" ry="24"/>
+        <ellipse data-m="calves" cx="128" cy="322" rx="10" ry="24"/>
+      </g>
+      <text class="figure-label" x="110" y="392">BACK</text>
+    </svg>
+  </template>
+
+  <div id="modal-root"></div>
+
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => navigator.serviceWorker.register('sw.js'));
+    }
+  </script>
+</body>
+</html>
