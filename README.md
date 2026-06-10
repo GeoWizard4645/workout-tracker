@@ -38,21 +38,22 @@ history. Your data only goes away if you delete the app icon itself (or
 from Settings occasionally — especially before major iOS updates or when
 switching phones.
 
-## Hosting at workout.vivaanshahani.com
+## Hosting at workout.vivaanshahani.com (Cloudflare Pages)
 
-The repo includes a `CNAME` file pointing at `workout.vivaanshahani.com`, and
-GitHub Pages serves the app. To finish the custom domain, add this DNS record
-wherever `vivaanshahani.com` is managed:
+The app is deployed with Cloudflare Pages connected to this GitHub repo —
+every push to `main` redeploys automatically.
 
-| Type  | Name      | Value                       |
-| ----- | --------- | --------------------------- |
-| CNAME | `workout` | `geowizard4645.github.io`   |
+Setup (one time, in the Cloudflare dashboard):
 
-Then in the GitHub repo: **Settings → Pages → Custom domain** should show
-`workout.vivaanshahani.com` — tick **Enforce HTTPS** once the certificate is
-issued (can take up to an hour after the DNS record propagates).
+1. **Workers & Pages → Create → Pages → Connect to Git** → pick this repo.
+2. Build settings: framework preset **None**, build command **empty**,
+   build output directory **/** (it's plain static files — nothing to build).
+3. After the first deploy, open the project's **Custom domains** tab and add
+   `workout.vivaanshahani.com`. Since the domain's DNS is on Cloudflare, the
+   record and HTTPS certificate are created automatically.
 
-Until DNS is set up, the app is live at the default Pages URL.
+To ship an update: edit files, bump `VERSION` in `sw.js` (so installed phones
+refresh their offline cache), commit and push.
 
 ## Install on your iPhone
 
