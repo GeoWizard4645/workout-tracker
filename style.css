@@ -88,6 +88,13 @@ input[type="text"], input[type="number"], input[type="search"] {
 }
 input:focus { border-color: var(--accent); }
 
+input[type="date"] {
+  background: var(--bg2); border: 1.5px solid var(--border); border-radius: 10px;
+  color: var(--text); font-family: inherit; font-size: 14px; font-weight: 600;
+  padding: 9px 10px; outline: none; -webkit-appearance: none; appearance: none;
+  color-scheme: dark;
+}
+
 /* ============ cards ============ */
 .card {
   background: var(--card); border: 1px solid var(--border);

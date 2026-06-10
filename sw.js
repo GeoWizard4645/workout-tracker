@@ -1,6 +1,6 @@
 // Cache-first service worker — makes the app fully offline once installed.
 // Bump VERSION whenever any file changes so installed phones pick up updates.
-const VERSION = 'wtt-v2';
+const VERSION = 'wtt-v3';
 const ASSETS = [
   './',
   './index.html',
@@ -26,6 +26,9 @@ self.addEventListener('activate', e => {
 
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
+  const url = new URL(e.request.url);
+  // never cache or intercept the sync API — it must always hit the network
+  if (url.pathname.includes('/api/')) return;
   e.respondWith(
     caches.match(e.request, { ignoreSearch: true }).then(cached =>
       cached ||

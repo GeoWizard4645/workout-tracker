@@ -55,6 +55,29 @@ Setup (one time, in the Cloudflare dashboard):
 To ship an update: edit files, bump `VERSION` in `sw.js` (so installed phones
 refresh their offline cache), commit and push.
 
+## Cloud sync (Cloudflare D1)
+
+The repo ships a Pages Function at `functions/api/sync.js` that backs up the
+app state to a D1 database and syncs it across devices. App updates never
+touch your data, but this protects against the two things that can: deleting
+the home-screen app, or losing the phone.
+
+One-time setup in the Cloudflare dashboard:
+
+1. Open the Pages project → **Settings → Bindings → Add → D1 database**.
+2. Variable name: `DB` (exactly). Database: pick your D1 database.
+3. Redeploy the project (Deployments → Retry, or just push a commit).
+
+Then in the app: **Settings → Cloud Sync → Set Up Cloud Sync** and pick a sync
+code. The code works like a password — it is hashed (SHA-256) before being
+used as the storage key and is never stored raw, so use something long and
+unique. Enter the same code on a second device to share one history.
+
+Sync behaviour: every change is pushed ~2.5 s after you make it; the app pulls
+on launch and whenever it returns to the foreground; newest copy (by save
+timestamp) always wins. If the server is unreachable the app keeps working
+offline and retries on the next change.
+
 ## Install on your iPhone
 
 1. Open that URL in **Safari**.

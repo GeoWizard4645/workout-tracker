@@ -10,15 +10,19 @@ const IDB_NAME = 'wtt';
 
 const DEFAULT_STATE = {
   savedAt: 0,
-  sessions: [],        // finished workouts
-  plans: [],           // saved workout plans
-  activeSession: null, // in-progress workout (survives app close)
+  sessions: [],         // finished workouts
+  plans: [],            // saved workout plans
+  customExercises: [],  // user-created exercises
+  activeSession: null,  // in-progress workout (survives app close)
   settings: {
     unit: 'lbs',
     excludeLegs: true,
-    equipment: ['barbell', 'dumbbell', 'machine', 'cable', 'bodyweight'],
+    syncCode: null,     // cloud sync passphrase (null = sync off)
+    equipment: ['barbell', 'dumbbell', 'machine', 'cable', 'bodyweight', 'kettlebell', 'band'],
   },
 };
+
+const ALL_EQUIPMENT = ['barbell', 'dumbbell', 'machine', 'cable', 'bodyweight', 'kettlebell', 'band'];
 
 function mergeState(data) {
   return {
@@ -69,6 +73,84 @@ function save() {
   const json = JSON.stringify(state);
   try { localStorage.setItem(STORE_KEY, json); } catch {}
   idbWrite(json);
+  scheduleSync();
+}
+
+// ---------------- exercise lookup (built-in + custom) ----------------
+function allEx() {
+  return state.customExercises.length ? EXERCISES.concat(state.customExercises) : EXERCISES;
+}
+function getEx(id) {
+  return EXERCISES_BY_ID[id] || state.customExercises.find(e => e.id === id);
+}
+
+// ---------------- cloud sync (Cloudflare D1 via /api/sync) ----------------
+let syncTimer = null;
+let syncStatus = { state: 'idle', at: null }; // idle | syncing | ok | error
+
+function setSyncStatus(s) {
+  syncStatus = { state: s, at: s === 'ok' ? Date.now() : syncStatus.at };
+  const el = $('#sync-status');
+  if (el) el.innerHTML = syncStatusHTML();
+}
+function syncStatusHTML() {
+  if (!state.settings.syncCode) return '';
+  if (syncStatus.state === 'syncing') return 'Syncing…';
+  if (syncStatus.state === 'error') return '<span style="color:var(--warn)">Couldn\'t reach the server — will retry on next change</span>';
+  if (syncStatus.at) return `Last synced ${new Date(syncStatus.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} ✓`;
+  return 'Waiting for first sync…';
+}
+
+function scheduleSync() {
+  if (!state.settings.syncCode) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(pushSync, 2500);
+}
+
+async function pushSync() {
+  const code = state.settings.syncCode;
+  if (!code) return;
+  setSyncStatus('syncing');
+  try {
+    const res = await fetch('api/sync', {
+      method: 'PUT',
+      headers: { 'Authorization': 'Bearer ' + code, 'content-type': 'application/json' },
+      body: JSON.stringify(state),
+    });
+    setSyncStatus(res.ok ? 'ok' : 'error');
+  } catch {
+    setSyncStatus('error');
+  }
+}
+
+// Pull from the cloud; adopt the remote copy only if it's newer than local
+async function pullSync({ silent = true } = {}) {
+  const code = state.settings.syncCode;
+  if (!code) return;
+  setSyncStatus('syncing');
+  try {
+    const res = await fetch('api/sync', { headers: { 'Authorization': 'Bearer ' + code } });
+    if (res.status === 404) { await pushSync(); return; } // nothing in the cloud yet — seed it
+    if (!res.ok) { setSyncStatus('error'); return; }
+    const remote = await res.json();
+    if ((remote.savedAt || 0) > (state.savedAt || 0)) {
+      const keepCode = state.settings.syncCode;
+      state = mergeState(remote);
+      state.settings.syncCode = keepCode;
+      state.savedAt = remote.savedAt;
+      const json = JSON.stringify(state);
+      try { localStorage.setItem(STORE_KEY, json); } catch {}
+      idbWrite(json);
+      render();
+      if (!silent) toast('Synced from cloud');
+    } else if ((state.savedAt || 0) > (remote.savedAt || 0)) {
+      await pushSync();
+      return;
+    }
+    setSyncStatus('ok');
+  } catch {
+    setSyncStatus('error');
+  }
 }
 
 async function bootStorage() {
@@ -86,7 +168,14 @@ async function bootStorage() {
   if (navigator.storage && navigator.storage.persist) {
     try { await navigator.storage.persist(); } catch {}
   }
+  // pull the cloud copy (if sync is on) — newest copy wins
+  pullSync();
 }
+
+// re-check the cloud whenever the app comes back to the foreground
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') pullSync();
+});
 
 // ---------------- helpers ----------------
 const $ = sel => document.querySelector(sel);
@@ -140,7 +229,7 @@ function muscleStatus() {
 
   for (const sess of state.sessions) {
     for (const ex of sess.exercises) {
-      const def = EXERCISES_BY_ID[ex.exId];
+      const def = getEx(ex.exId);
       if (!def) continue;
       if (!ex.sets.some(s => s.done)) continue;
       for (const m of def.primary) {
@@ -197,7 +286,7 @@ function suggestSplit(status) {
 
 // Build an exercise list covering the given muscles (rule-based, no AI)
 function generateWorkout(muscles, count = 6) {
-  const allowed = EXERCISES.filter(e => state.settings.equipment.includes(e.equipment));
+  const allowed = allEx().filter(e => state.settings.equipment.includes(e.equipment));
   const status = muscleStatus();
   const ordered = [...muscles].sort((a, b) => (status[b].days ?? 999) - (status[a].days ?? 999));
   const picked = [];
@@ -230,7 +319,7 @@ function generateWorkout(muscles, count = 6) {
 function workoutTargets(exIds) {
   const primary = new Set(), secondary = new Set();
   for (const id of exIds) {
-    const def = EXERCISES_BY_ID[id];
+    const def = getEx(id);
     if (!def) continue;
     def.primary.forEach(m => primary.add(m));
     def.secondary.forEach(m => secondary.add(m));
@@ -288,9 +377,17 @@ function newSets() {
   return [{ w: '', r: '', done: false }, { w: '', r: '', done: false }, { w: '', r: '', done: false }];
 }
 
+// when set, new sessions are logged onto this past date instead of today
+let logDate = null;
+
 function startSession(name, exIds) {
+  const backdated = !!(logDate && logDate !== dateKey());
   state.activeSession = {
-    id: uid(), date: dateKey(), start: Date.now(), name,
+    id: uid(),
+    date: backdated ? logDate : dateKey(),
+    start: backdated ? parseKey(logDate).getTime() + 12 * 3600000 : Date.now(),
+    backdated,
+    name,
     exercises: exIds.map(id => ({ exId: id, sets: newSets() })),
   };
   save();
@@ -316,12 +413,13 @@ function finishSession() {
     });
     return;
   }
-  state.sessions.push({ id: s.id, date: s.date, start: s.start, end: Date.now(), name: s.name, exercises: cleaned });
+  state.sessions.push({ id: s.id, date: s.date, start: s.start, end: s.backdated ? null : Date.now(), name: s.name, exercises: cleaned });
   state.sessions.sort((a, b) => a.date.localeCompare(b.date) || a.start - b.start);
   state.activeSession = null;
+  logDate = null;
   save();
-  toast('Workout saved 💪');
-  navigate('home');
+  toast(s.backdated ? `Logged on ${fmtDay(s.date)} 💪` : 'Workout saved 💪');
+  navigate(s.backdated ? 'history' : 'home');
 }
 
 // ---------------- modals ----------------
@@ -370,7 +468,7 @@ function promptSheet({ title, placeholder = '', value = '', submitLabel = 'Save'
 
 // Exercise detail: what it is, what it hits (with diagram), your last numbers
 function openExerciseDetail(exId, onAdd) {
-  const e = EXERCISES_BY_ID[exId];
+  const e = getEx(exId);
   if (!e) return;
   const prev = lastSetFor(exId);
   const unit = state.settings.unit;
@@ -405,7 +503,7 @@ function openWorkoutPreview(name, exIds, { startLabel = 'Start Workout', onStart
       <span><i style="background:rgba(52,211,153,.32)"></i> also worked</span>
     </div>
     ${exIds.map(id => {
-      const e = EXERCISES_BY_ID[id];
+      const e = getEx(id);
       return `<div class="ex-item" data-action="ex-detail" data-id="${id}">
         <div class="ex-info">
           <div class="ex-name">${esc(e?.name || id)}</div>
@@ -423,24 +521,25 @@ let previewStartCallback = null;
 // Searchable exercise picker → callback with exercise id
 function openExercisePicker(onPick) {
   const render = (q = '', muscle = '') => {
-    const list = EXERCISES.filter(e =>
+    const list = allEx().filter(e =>
       (!q || e.name.toLowerCase().includes(q.toLowerCase())) &&
       (!muscle || e.primary.includes(muscle))
     );
-    return list.map(e => `
+    return (list.map(e => `
       <div class="ex-item" data-pick="${e.id}">
         <span class="ex-info-icon" data-info="${e.id}">ⓘ</span>
         <div class="ex-info">
           <div class="ex-name">${esc(e.name)}</div>
-          <div class="ex-meta">${e.primary.map(m => MUSCLES[m].name).join(', ')} · ${e.equipment}</div>
+          <div class="ex-meta">${e.custom ? 'custom · ' : ''}${e.primary.map(m => MUSCLES[m].name).join(', ')} · ${e.equipment}</div>
         </div>
         <span style="color:var(--accent);font-size:20px;font-weight:700">+</span>
-      </div>`).join('') || '<div class="empty">No matches</div>';
+      </div>`).join('') || '<div class="empty">No matches</div>')
+      + `<button class="btn btn-ghost btn-block" id="picker-create" style="margin-top:8px">+ Create "${q ? esc(q) : 'a custom exercise'}"</button>`;
   };
 
   const root = showModal(`
     <h2>Add Exercise</h2>
-    <input type="search" id="picker-search" placeholder="Search exercises…" autocomplete="off">
+    <input type="search" id="picker-search" placeholder="Search ${allEx().length} exercises…" autocomplete="off">
     <div class="chip-list" id="picker-muscles">
       ${Object.entries(MUSCLES).map(([k, m]) => `<button class="chip" data-muscle="${k}">${m.name}</button>`).join('')}
     </div>
@@ -458,10 +557,62 @@ function openExercisePicker(onPick) {
     refresh();
   });
   root.querySelector('#picker-list').addEventListener('click', e => {
+    if (e.target.closest('#picker-create')) {
+      openCustomExerciseSheet(root.querySelector('#picker-search').value.trim(), onPick);
+      return;
+    }
     const info = e.target.closest('[data-info]');
     if (info) { openExerciseDetail(info.dataset.info, onPick); return; }
     const item = e.target.closest('[data-pick]');
     if (item) { closeModal(); onPick(item.dataset.pick); }
+  });
+}
+
+// Create-your-own exercise: name it, tag the muscles it hits, done.
+function openCustomExerciseSheet(prefillName, onPick) {
+  const primary = new Set();
+  let equipment = 'dumbbell';
+  const root = showModal(`
+    <h2>Create Custom Exercise</h2>
+    <p class="muted" style="margin-bottom:10px">It'll show up in search and count toward your muscle map like any other exercise.</p>
+    <input type="text" id="cx-name" placeholder="Exercise name" value="${esc(prefillName || '')}" autocomplete="off">
+    <h2 style="margin-top:14px">Muscles it targets</h2>
+    <div class="chip-list" id="cx-muscles">
+      ${Object.entries(MUSCLES).map(([k, m]) => `<button class="chip" data-m="${k}">${m.name}</button>`).join('')}
+    </div>
+    <h2 style="margin-top:14px">Equipment</h2>
+    <div class="chip-list" id="cx-equip">
+      ${ALL_EQUIPMENT.map(eq => `<button class="chip ${eq === equipment ? 'on' : ''}" data-eq="${eq}">${eq}</button>`).join('')}
+    </div>
+    <button class="btn btn-primary btn-block" id="cx-save" style="margin-top:16px">Save Exercise</button>
+  `);
+  root.querySelector('#cx-muscles').addEventListener('click', e => {
+    const btn = e.target.closest('[data-m]');
+    if (!btn) return;
+    const m = btn.dataset.m;
+    primary.has(m) ? primary.delete(m) : primary.add(m);
+    btn.classList.toggle('on', primary.has(m));
+  });
+  root.querySelector('#cx-equip').addEventListener('click', e => {
+    const btn = e.target.closest('[data-eq]');
+    if (!btn) return;
+    equipment = btn.dataset.eq;
+    root.querySelectorAll('#cx-equip .chip').forEach(c => c.classList.toggle('on', c.dataset.eq === equipment));
+  });
+  root.querySelector('#cx-save').addEventListener('click', () => {
+    const name = root.querySelector('#cx-name').value.trim();
+    if (!name) { toast('Give it a name'); return; }
+    if (!primary.size) { toast('Pick at least one muscle'); return; }
+    const ex = {
+      id: 'custom-' + uid(), name, primary: [...primary], secondary: [],
+      equipment, compound: primary.size > 1, custom: true,
+      desc: 'Custom exercise you created.',
+    };
+    state.customExercises.push(ex);
+    save();
+    toast('Exercise created');
+    closeModal();
+    if (onPick) onPick(ex.id); else render();
   });
 }
 
@@ -474,14 +625,14 @@ function openMuscleDetail(muscle) {
   for (const sess of state.sessions) {
     if (sess.date < monthAgo) continue;
     for (const ex of sess.exercises) {
-      const def = EXERCISES_BY_ID[ex.exId];
+      const def = getEx(ex.exId);
       if (def && def.primary.includes(muscle)) {
         const done = ex.sets.filter(s => s.done).length;
         if (done) { sets30 += done; sessions30.add(sess.id); }
       }
     }
   }
-  const exs = EXERCISES.filter(e => e.primary.includes(muscle) && state.settings.equipment.includes(e.equipment)).slice(0, 7);
+  const exs = allEx().filter(e => e.primary.includes(muscle) && state.settings.equipment.includes(e.equipment)).slice(0, 7);
   showModal(`
     <h2>${esc(m.name)}</h2>
     <p style="font-size:14px;line-height:1.55;color:var(--text-dim);margin:6px 2px 14px">${esc(m.desc)}</p>
@@ -508,7 +659,7 @@ function openMuscleDetail(muscle) {
 let currentTab = 'home';
 let historyMonth = new Date();
 let historySelected = dateKey();
-let plannerState = { split: 'push', muscles: [], count: 6, generated: null };
+let plannerState = { split: 'push', muscles: [], count: 6, generated: null, name: null };
 
 function navigate(tab) {
   currentTab = tab;
@@ -599,16 +750,17 @@ function viewPlan() {
   const generatedHTML = p.generated ? `
     <div class="card">
       <div class="row-between" style="margin-bottom:10px">
-        <h2 style="margin:0">Your Plan</h2>
-        <button class="btn btn-small" data-action="plan-shuffle">↻ Shuffle</button>
+        <h2 style="margin:0">${esc(p.name || 'Your Plan')}</h2>
+        ${p.split !== 'manual' ? '<button class="btn btn-small" data-action="plan-shuffle">↻ Shuffle</button>' : ''}
       </div>
-      ${bodyMapsHTML({ target: targets, mini: true })}
-      <div class="legend" style="margin-bottom:12px">
-        <span><i style="background:var(--accent)"></i> primary target</span>
-        <span><i style="background:rgba(52,211,153,.32)"></i> also worked</span>
-      </div>
+      ${p.generated.length ? `
+        ${bodyMapsHTML({ target: targets, mini: true })}
+        <div class="legend" style="margin-bottom:12px">
+          <span><i style="background:var(--accent)"></i> primary target</span>
+          <span><i style="background:rgba(52,211,153,.32)"></i> also worked</span>
+        </div>` : '<div class="empty">No exercises yet — add some below</div>'}
       ${p.generated.map((id, i) => {
-        const e = EXERCISES_BY_ID[id];
+        const e = getEx(id);
         return `<div class="ex-item" data-action="ex-detail" data-id="${id}">
           <div class="ex-info"><div class="ex-name">${esc(e.name)}</div><div class="ex-meta">${e.primary.map(m => MUSCLES[m].name).join(', ')} · ${e.equipment}</div></div>
           <span class="ex-info-icon">ⓘ</span>
@@ -642,6 +794,7 @@ function viewPlan() {
         ${[4, 5, 6, 7, 8].map(n => `<button class="${p.count === n ? 'on' : ''}" data-action="plan-count" data-count="${n}">${n}</button>`).join('')}
       </div>
       <button class="btn btn-primary btn-block" style="margin-top:14px" data-action="plan-generate">Generate Workout</button>
+      <button class="btn btn-ghost btn-block" style="margin-top:8px" data-action="plan-manual">✎ Build one manually instead</button>
     </div>
 
     ${generatedHTML}
@@ -652,7 +805,7 @@ function viewPlan() {
         <div class="ex-item" data-action="plan-preview" data-id="${pl.id}">
           <div class="ex-info">
             <div class="ex-name">${esc(pl.name)}</div>
-            <div class="ex-meta">${pl.exIds.length} exercises · ${[...new Set(pl.exIds.flatMap(id => EXERCISES_BY_ID[id]?.primary || []))].map(m => MUSCLES[m].name).slice(0, 4).join(', ')}</div>
+            <div class="ex-meta">${pl.exIds.length} exercises · ${[...new Set(pl.exIds.flatMap(id => getEx(id)?.primary || []))].map(m => MUSCLES[m].name).slice(0, 4).join(', ')}</div>
           </div>
           <button class="btn btn-small btn-primary" data-action="plan-start-saved" data-id="${pl.id}">Start</button>
           <button class="ex-remove" data-action="plan-delete" data-id="${pl.id}">×</button>
@@ -667,9 +820,20 @@ function viewLog() {
   const suggestion = suggestSplit(status);
   const last = state.sessions[state.sessions.length - 1];
 
+  const today = dateKey();
   return `
     <h1>Start a Workout</h1>
     <p class="subtitle">Log as you go — sets, reps and weight</p>
+
+    <div class="section card card-tight ${logDate ? 'suggestion-card' : ''}">
+      <div class="row-between">
+        <div>
+          <div class="ex-name">Logging for: ${logDate ? fmtDay(logDate) : 'Today'}</div>
+          <div class="muted">${logDate ? 'This workout will be saved to that day' : 'Pick a past date to log an old workout'}</div>
+        </div>
+        <input type="date" id="logdate-input" value="${logDate || today}" max="${today}">
+      </div>
+    </div>
 
     ${suggestion ? `
       <div class="section card suggestion-card">
@@ -722,7 +886,7 @@ function viewSession() {
   const unit = state.settings.unit;
 
   const exHTML = s.exercises.map((ex, ei) => {
-    const def = EXERCISES_BY_ID[ex.exId];
+    const def = getEx(ex.exId);
     const prev = lastSetFor(ex.exId);
     return `
       <div class="card">
@@ -749,7 +913,9 @@ function viewSession() {
     <div class="row-between">
       <div>
         <h1>${esc(s.name)}</h1>
-        <p class="subtitle">Started ${new Date(s.start).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} · <span class="session-timer" id="session-timer">${fmtClock(Date.now() - s.start)}</span></p>
+        <p class="subtitle">${s.backdated
+          ? `Logging for <b style="color:var(--accent)">${fmtDay(s.date)}</b>`
+          : `Started ${new Date(s.start).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} · <span class="session-timer" id="session-timer">${fmtClock(Date.now() - s.start)}</span>`}</p>
       </div>
     </div>
 
@@ -805,7 +971,7 @@ function viewHistory() {
         <div class="chip-list">${targets.primary.map(m => `<span class="chip chip-static">${MUSCLES[m].name}</span>`).join('')}</div>
         ${s.exercises.map(e => `
           <div class="muscle-row" data-action="ex-detail" data-id="${e.exId}">
-            <span class="muscle-name">${esc(EXERCISES_BY_ID[e.exId]?.name || e.exId)}</span>
+            <span class="muscle-name">${esc(getEx(e.exId)?.name || e.exId)}</span>
             <span class="muscle-days">${e.sets.map(set => `${set.w || 0}×${set.r || 0}`).join('  ')}</span>
           </div>`).join('')}
       </div>`;
@@ -836,6 +1002,7 @@ function viewHistory() {
     <div class="section">
       <h2>${fmtDay(historySelected)}</h2>
       ${dayHTML}
+      ${historySelected <= todayK ? `<button class="btn btn-ghost btn-block" data-action="hist-log-day" style="margin-top:4px">+ Log a workout on this day</button>` : ''}
     </div>`;
 }
 
@@ -844,7 +1011,7 @@ function viewSettings() {
   const s = state.settings;
   return `
     <h1>Settings</h1>
-    <p class="subtitle">All data lives on this device — nothing leaves your phone</p>
+    <p class="subtitle">Your data lives on this device${s.syncCode ? ' + your own Cloudflare database' : ' — turn on Cloud Sync to back it up'}</p>
 
     <div class="section card">
       <h2>Units</h2>
@@ -868,13 +1035,29 @@ function viewSettings() {
       <h2>My Equipment</h2>
       <p class="muted" style="margin-bottom:8px">Generated workouts only use what you have</p>
       <div class="chip-list">
-        ${['barbell', 'dumbbell', 'machine', 'cable', 'bodyweight'].map(eq =>
+        ${ALL_EQUIPMENT.map(eq =>
           `<button class="chip ${s.equipment.includes(eq) ? 'on' : ''}" data-action="toggle-equip" data-equip="${eq}">${eq}</button>`).join('')}
       </div>
     </div>
 
+    <div class="section card ${s.syncCode ? 'suggestion-card' : ''}">
+      <h2>Cloud Sync ${s.syncCode ? '<span class="badge" style="margin-left:6px">On</span>' : ''}</h2>
+      ${s.syncCode ? `
+        <p class="muted" style="margin-bottom:4px">Every change is backed up to your Cloudflare database. Use the same sync code on another device to share your data.</p>
+        <p class="muted" style="margin-bottom:10px">Code: <b style="color:var(--text);user-select:all;-webkit-user-select:all">${esc(s.syncCode)}</b></p>
+        <p class="muted" style="margin-bottom:10px" id="sync-status">${syncStatusHTML()}</p>
+        <div class="row">
+          <button class="btn grow" data-action="sync-now">Sync Now</button>
+          <button class="btn btn-ghost grow" data-action="sync-off">Turn Off</button>
+        </div>
+      ` : `
+        <p class="muted" style="margin-bottom:10px">Back up every workout to your own Cloudflare D1 database and sync across devices. Pick a sync code (like a password) — anyone with the code can read this data, so make it long and unique.</p>
+        <button class="btn btn-primary btn-block" data-action="sync-setup">Set Up Cloud Sync</button>
+      `}
+    </div>
+
     <div class="section card">
-      <h2>Your Data</h2>
+      <h2>On-Device Storage</h2>
       <p class="muted" style="margin-bottom:6px">Saved to two separate stores on this device on every change (localStorage + IndexedDB), so it survives clearing either one. <span id="persist-status"></span></p>
       <p class="muted" style="margin-bottom:10px">Export a backup file occasionally — especially before iOS updates or switching phones.</p>
       <div class="row">
@@ -906,13 +1089,14 @@ function updateSessionBar() {
   const show = state.activeSession && currentTab !== 'session' && currentTab !== 'log';
   bar.classList.toggle('hidden', !show);
   if (show) {
-    $('#session-bar-text').textContent = `${state.activeSession.name} · ${fmtClock(Date.now() - state.activeSession.start)}`;
+    const s = state.activeSession;
+    $('#session-bar-text').textContent = s.backdated ? `${s.name} · ${fmtDay(s.date)}` : `${s.name} · ${fmtClock(Date.now() - s.start)}`;
   }
   if (currentTab === 'settings') updatePersistStatus();
 }
 
 setInterval(() => {
-  if (!state.activeSession) return;
+  if (!state.activeSession || state.activeSession.backdated) return;
   const t = $('#session-timer');
   if (t) t.textContent = fmtClock(Date.now() - state.activeSession.start);
   updateSessionBar();
@@ -1003,25 +1187,40 @@ document.body.addEventListener('click', e => {
   }
   if (a === 'plan-count') { plannerState.count = Number(el.dataset.count); render(); }
   if (a === 'plan-generate' || a === 'plan-shuffle') {
-    const muscles = plannerState.split === 'custom' ? plannerState.muscles : SPLITS[plannerState.split].muscles;
+    const muscles = SPLITS[plannerState.split] ? SPLITS[plannerState.split].muscles : plannerState.muscles;
     if (!muscles.length) { toast('Pick at least one muscle'); return; }
+    if (plannerState.split === 'manual') plannerState.split = 'custom';
+    plannerState.name = null;
     plannerState.generated = generateWorkout(muscles, plannerState.count);
     render();
+  }
+  if (a === 'plan-manual') {
+    promptSheet({
+      title: 'Name your workout',
+      placeholder: 'e.g. My Chest Routine',
+      submitLabel: 'Create',
+    }, name => {
+      plannerState = { split: 'manual', muscles: [], count: 6, generated: [], name };
+      render();
+      openExercisePicker(id => { plannerState.generated.push(id); render(); });
+    });
   }
   if (a === 'plan-remove') { plannerState.generated.splice(Number(el.dataset.idx), 1); render(); }
   if (a === 'plan-add') openExercisePicker(id => { plannerState.generated.push(id); render(); });
   if (a === 'plan-save') {
+    if (!plannerState.generated.length) { toast('Add at least one exercise'); return; }
     promptSheet({
       title: 'Name this plan',
       placeholder: 'e.g. Tuesday Push',
-      value: plannerState.split === 'custom' ? 'Custom Plan' : SPLITS[plannerState.split].name,
+      value: plannerState.name || (SPLITS[plannerState.split] ? SPLITS[plannerState.split].name : 'Custom Plan'),
     }, name => {
       state.plans.push({ id: uid(), name, exIds: [...plannerState.generated] });
       save(); render(); toast('Plan saved');
     });
   }
   if (a === 'plan-start') {
-    const name = plannerState.split === 'custom' ? 'Custom Workout' : SPLITS[plannerState.split].name;
+    if (!plannerState.generated.length) { toast('Add at least one exercise'); return; }
+    const name = plannerState.name || (SPLITS[plannerState.split] ? SPLITS[plannerState.split].name : 'Custom Workout');
     startSession(name, [...plannerState.generated]);
   }
   if (a === 'plan-preview') {
@@ -1093,6 +1292,11 @@ document.body.addEventListener('click', e => {
 
   // --- history ---
   if (a === 'hist-day') { historySelected = el.dataset.key; render(); }
+  if (a === 'hist-log-day') {
+    logDate = historySelected === dateKey() ? null : historySelected;
+    navigate('log');
+    if (logDate) toast(`Logging for ${fmtDay(logDate)}`);
+  }
   if (a === 'hist-prev') { historyMonth = new Date(historyMonth.getFullYear(), historyMonth.getMonth() - 1, 1); render(); }
   if (a === 'hist-next') { historyMonth = new Date(historyMonth.getFullYear(), historyMonth.getMonth() + 1, 1); render(); }
   if (a === 'hist-delete') {
@@ -1121,11 +1325,39 @@ document.body.addEventListener('click', e => {
   }
   if (a === 'export-data') exportData();
   if (a === 'import-data') $('#import-file').click();
+  if (a === 'sync-setup') {
+    const rnd = [...crypto.getRandomValues(new Uint8Array(9))].map(b => b.toString(16).padStart(2, '0')).join('');
+    promptSheet({
+      title: 'Choose a sync code',
+      placeholder: 'min 8 characters',
+      value: `${rnd.slice(0, 6)}-${rnd.slice(6, 12)}-${rnd.slice(12, 18)}`,
+      submitLabel: 'Enable Sync',
+    }, code => {
+      if (code.length < 8) { toast('Use at least 8 characters'); return; }
+      state.settings.syncCode = code;
+      save(); render();
+      pullSync({ silent: false }); // adopts existing cloud data for this code, or seeds it
+      toast('Cloud sync enabled');
+    });
+  }
+  if (a === 'sync-now') { pullSync({ silent: false }); }
+  if (a === 'sync-off') {
+    confirmSheet({
+      title: 'Turn off cloud sync',
+      message: 'Your data stays on this device and in the cloud — it just stops syncing.',
+      confirmLabel: 'Turn off',
+    }, () => {
+      state.settings.syncCode = null;
+      save(); render();
+    });
+  }
   if (a === 'clear-data') {
     confirmSheet({
-      title: 'Erase all data', message: 'Every workout, plan and setting will be permanently deleted from this device.',
+      title: 'Erase all data', message: 'Every workout, plan and setting will be permanently deleted from this device' + (state.settings.syncCode ? ' and from your cloud backup' : '') + '.',
       confirmLabel: 'Erase everything', danger: true,
     }, () => {
+      const code = state.settings.syncCode;
+      if (code) fetch('api/sync', { method: 'DELETE', headers: { 'Authorization': 'Bearer ' + code } }).catch(() => {});
       state = structuredClone(DEFAULT_STATE);
       save(); render(); toast('All data erased');
     });
@@ -1142,6 +1374,11 @@ document.body.addEventListener('input', e => {
 });
 document.body.addEventListener('change', e => {
   if (e.target.id === 'import-file' && e.target.files[0]) { importData(e.target.files[0]); e.target.value = ''; }
+  if (e.target.id === 'logdate-input') {
+    const v = e.target.value;
+    logDate = (!v || v === dateKey() || v > dateKey()) ? null : v;
+    render();
+  }
 });
 
 // ---------------- boot ----------------
